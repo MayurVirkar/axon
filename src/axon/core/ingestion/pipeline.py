@@ -20,6 +20,7 @@ Phases executed:
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,7 @@ from axon.core.ingestion.symbol_lookup import build_name_index
 from axon.core.ingestion.types import process_types
 from axon.core.ingestion.walker import FileEntry, walk_repo
 from axon.core.storage.base import StorageBackend
+
 
 @dataclass
 class PipelineResult:
@@ -143,14 +145,12 @@ def run_pipeline(
     process_imports(parse_data, graph, parallel=True)
     report("Resolving imports", 1.0)
 
-    # Build shared name index once — used by calls, heritage, and types phases.
     _SHARED_LABELS = (
         NodeLabel.FUNCTION, NodeLabel.METHOD, NodeLabel.CLASS,
         NodeLabel.INTERFACE, NodeLabel.TYPE_ALIAS,
     )
     shared_name_index = build_name_index(graph, _SHARED_LABELS)
 
-    # --- Phase-level concurrency: calls/heritage/types resolve in parallel ---
     report("Resolving relationships", 0.0)
     with ThreadPoolExecutor(max_workers=3) as pool:
         calls_f = pool.submit(
@@ -166,25 +166,18 @@ def run_pipeline(
             name_index=shared_name_index, parallel=False, collect=True,
         )
 
-    # Sequential batch write — all edges collected, graph is single-threaded.
     _write_collected_edges(calls_f.result() or [], graph)
 
-    heritage_result = heritage_f.result()
-    if isinstance(heritage_result, tuple):
-        heritage_edges, heritage_patches = heritage_result
-        _write_collected_edges(heritage_edges, graph)
-        # Apply deferred property patches (protocol/ABC annotations).
-        for patch in heritage_patches:
-            node = graph.get_node(patch.node_id)
-            if node is not None:
-                node.properties[patch.key] = patch.value
-    else:
-        _write_collected_edges(heritage_result or [], graph)
+    heritage_edges, heritage_patches = heritage_f.result()
+    _write_collected_edges(heritage_edges, graph)
+    for patch in heritage_patches:
+        node = graph.get_node(patch.node_id)
+        if node is not None:
+            node.properties[patch.key] = patch.value
 
     _write_collected_edges(types_f.result() or [], graph)
     report("Resolving relationships", 1.0)
 
-    # --- Overlap coupling (git I/O) with sequential global phases ---
     with ThreadPoolExecutor(max_workers=1) as pool:
         coupling_future = pool.submit(resolve_coupling, graph, repo_path)
 
@@ -206,8 +199,6 @@ def run_pipeline(
         result.coupled_pairs = len(coupling_edges)
         report("Analyzing git history", 1.0)
 
-    # Compute result counts before the optional embedding step so a
-    # fastembed failure never leaves symbols/relationships at zero.
     result.symbols = sum(1 for n in graph.iter_nodes() if n.label in _SYMBOL_LABELS)
     result.relationships = graph.relationship_count
 
@@ -224,8 +215,7 @@ def run_pipeline(
                 result.embeddings = len(node_embeddings)
                 report("Generating embeddings", 1.0)
             except Exception:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
+                logging.getLogger(__name__).warning(
                     "Embedding phase failed — search will use FTS only",
                     exc_info=True,
                 )
@@ -302,10 +292,6 @@ def reindex_files(
     return graph
 
 def build_graph(repo_path: Path) -> KnowledgeGraph:
-    """Run phases 1-11 and return the in-memory graph (no storage load).
-
-    This is used by branch comparison to build a graph snapshot without
-    needing a storage backend.
-    """
+    """Run phases 1-11 and return the in-memory graph without persisting to storage."""
     graph, _ = run_pipeline(repo_path, embeddings=False)
     return graph

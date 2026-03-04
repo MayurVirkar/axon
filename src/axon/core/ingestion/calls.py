@@ -13,6 +13,8 @@ Resolution priority:
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
@@ -123,7 +125,6 @@ def resolve_call(
         if result is not None:
             return result, 1.0
 
-    # Without type info the receiver doesn't help — fall through to name-based resolution.
     candidate_ids = call_index.get(name, [])
     if not candidate_ids:
         return None, 0.0
@@ -177,11 +178,9 @@ def _build_import_cache(
     file_path: str,
     graph: KnowledgeGraph,
 ) -> dict[str, set[str]]:
-    """Build a cache of {symbol_name → set of imported file_paths} for a file.
+    """Build {symbol_name → set of imported file_paths} for a file.
 
-    Returns a dict where each key is a symbol name that was imported,
-    mapping to the set of file paths it could resolve from.  A special
-    key ``"*"`` contains file paths from wildcard/full-module imports.
+    The special key ``"*"`` contains file paths from wildcard/full-module imports.
     """
     source_file_id = generate_id(NodeLabel.FILE, file_path)
     import_rels = graph.get_outgoing(source_file_id, RelType.IMPORTS)
@@ -250,7 +249,7 @@ def _pick_closest(
     Returns ``None`` if no candidates can be resolved to actual nodes.
     """
     best_id: str | None = None
-    best_score: tuple[int, int] = (-1, 0)  # (prefix_len, -path_len)
+    best_score: tuple[int, int] = (-1, 0)
 
     for nid in candidate_ids:
         node = graph.get_node(nid)
@@ -487,9 +486,6 @@ def process_calls(
     file_sym_index = build_file_symbol_index(graph, _CALLABLE_LABELS)
 
     if parallel and len(parse_data) > 1:
-        import os
-        from concurrent.futures import ThreadPoolExecutor
-
         workers = min(os.cpu_count() or 4, 8, len(parse_data))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
@@ -503,7 +499,6 @@ def process_calls(
             for fpd in parse_data
         ]
 
-    # Flatten and cross-file dedup by rel_id.
     seen: set[str] = set()
     deduped: list[ResolvedEdge] = []
     for file_edges in per_file_edges:
@@ -515,7 +510,6 @@ def process_calls(
     if collect:
         return deduped
 
-    # Write to graph.
     for edge in deduped:
         graph.add_relationship(
             GraphRelationship(

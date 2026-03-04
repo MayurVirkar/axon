@@ -11,7 +11,6 @@ from pathlib import Path
 from axon.config.ignore import DEFAULT_IGNORE_PATTERNS, should_ignore
 from axon.config.languages import get_language, is_supported
 
-# Directories to prune during os.walk() — never descend into these.
 _PRUNE_DIRS: frozenset[str] = frozenset(
     p for p in DEFAULT_IGNORE_PATTERNS
     if ("*" not in p and "." not in p) or p.startswith(".")
@@ -23,14 +22,11 @@ _PRUNE_DIRS: frozenset[str] = frozenset(
 
 @dataclass
 class FileEntry:
-    """A source file discovered during walking."""
-
-    path: str  # relative path from repo root (e.g., "src/auth/validate.py")
-    content: str  # full file content
-    language: str  # "python", "typescript", "javascript"
+    path: str
+    content: str
+    language: str
 
 def _discover_via_git(repo_path: Path, gitignore_patterns: list[str] | None) -> list[Path] | None:
-    """Try to discover files via ``git ls-files`` (fastest for git repos)."""
     try:
         result = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
@@ -58,11 +54,9 @@ def _discover_via_git(repo_path: Path, gitignore_patterns: list[str] | None) -> 
 
 
 def _discover_via_walk(repo_path: Path, gitignore_patterns: list[str] | None) -> list[Path]:
-    """Discover files via os.walk() with directory pruning."""
     discovered: list[Path] = []
 
     for dirpath, dirnames, filenames in os.walk(repo_path, topdown=True):
-        # Prune ignored directories in-place (prevents descending).
         dirnames[:] = [
             d for d in dirnames
             if d not in _PRUNE_DIRS and not d.endswith(".egg-info")
@@ -88,27 +82,7 @@ def discover_files(
     repo_path: Path,
     gitignore_patterns: list[str] | None = None,
 ) -> list[Path]:
-    """Discover supported source file paths without reading their content.
-
-    Tries ``git ls-files`` first for speed in git repos, falls back to
-    ``os.walk()`` with directory-level pruning.
-
-    Parameters
-    ----------
-    repo_path:
-        Root directory of the repository to walk.
-    gitignore_patterns:
-        Optional list of gitignore-style patterns (e.g. from
-        :func:`axon.config.ignore.load_gitignore`).
-
-    Returns
-    -------
-    list[Path]
-        List of absolute :class:`Path` objects for each discovered file.
-    """
     repo_path = repo_path.resolve()
-
-    # Try git ls-files first — respects .gitignore natively and is fast.
     result = _discover_via_git(repo_path, gitignore_patterns)
     if result is not None:
         return result
@@ -116,11 +90,6 @@ def discover_files(
     return _discover_via_walk(repo_path, gitignore_patterns)
 
 def read_file(repo_path: Path, file_path: Path) -> FileEntry | None:
-    """Read a single file and return a :class:`FileEntry`, or ``None`` on failure.
-
-    Returns ``None`` when the file cannot be decoded as UTF-8 (binary files),
-    when the file is empty, or when an OS-level error occurs.
-    """
     relative = file_path.relative_to(repo_path)
 
     try:
@@ -146,27 +115,6 @@ def walk_repo(
     gitignore_patterns: list[str] | None = None,
     max_workers: int = 8,
 ) -> list[FileEntry]:
-    """Walk a repository and return all supported source files with their content.
-
-    Discovers files using the same filtering logic as :func:`discover_files`,
-    then reads their content in parallel using a :class:`ThreadPoolExecutor`.
-
-    Parameters
-    ----------
-    repo_path:
-        Root directory of the repository to walk.
-    gitignore_patterns:
-        Optional list of gitignore-style patterns (e.g. from
-        :func:`axon.config.ignore.load_gitignore`).
-    max_workers:
-        Maximum number of threads for parallel file reading.  Defaults to 8.
-
-    Returns
-    -------
-    list[FileEntry]
-        Sorted (by path) list of :class:`FileEntry` objects for every
-        discovered source file.
-    """
     repo_path = repo_path.resolve()
     file_paths = discover_files(repo_path, gitignore_patterns)
 

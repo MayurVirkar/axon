@@ -119,7 +119,6 @@ def _compute_dirty_node_ids(graph: KnowledgeGraph, dirty_files: set[str]) -> set
     return dirty_node_ids | neighbor_ids
 
 
-# Threshold: if fewer than this many files changed, skip communities/processes.
 _SMALL_CHANGE_THRESHOLD = 3
 
 
@@ -238,7 +237,6 @@ async def watch_repo(
         yield_on_timeout=True,
         stop_event=stop_event,
     ):
-        # --- Tier 1: Immediate file-local reindex ---
         changed_paths: list[Path] = []
         seen: set[str] = set()
         for _change_type, path_str in changes:
@@ -257,7 +255,6 @@ async def watch_repo(
                     first_dirty_time = last_change_time
                 logger.info("Reindexed %d file(s), %d paths dirty", count, len(reindexed))
 
-        # --- Tier 2: Debounced global phases ---
         now = time.monotonic()
         quiet_elapsed = last_change_time > 0 and (now - last_change_time) >= QUIET_PERIOD
         starvation = first_dirty_time > 0 and (now - first_dirty_time) >= MAX_DIRTY_AGE

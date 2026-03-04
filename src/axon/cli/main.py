@@ -20,7 +20,6 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 def _load_storage(repo_path: Path | None = None) -> "KuzuBackend":  # noqa: F821
-    """Load the KuzuDB backend for the given or current repo."""
     from axon.core.storage.kuzu_backend import KuzuBackend
 
     target = (repo_path or Path.cwd()).resolve()
@@ -81,7 +80,6 @@ def _register_in_global_registry(meta: dict, repo_path: Path) -> None:
 
 
 def _build_meta(result: "PipelineResult", repo_path: Path) -> dict:  # noqa: F821
-    """Build the meta.json dict from a pipeline result."""
     return {
         "version": __version__,
         "name": repo_path.name,
@@ -107,7 +105,6 @@ app = typer.Typer(
 )
 
 def _version_callback(value: bool) -> None:
-    """Print the version and exit."""
     if value:
         console.print(f"Axon v{__version__}")
         raise typer.Exit()
@@ -423,8 +420,6 @@ def serve(
     axon_dir.mkdir(parents=True, exist_ok=True)
     db_path = axon_dir / "kuzu"
 
-    # Try to acquire the write lock.  If another axon process already holds
-    # it, fall back to read-only mode (MCP server only, no file watcher).
     storage = KuzuBackend()
     read_only_fallback = False
     try:
@@ -442,8 +437,6 @@ def serve(
             raise
 
     if read_only_fallback:
-        # Read-only mode: just run the MCP server.
-        # _storage stays None in server.py → per-call short-lived connections.
         asyncio.run(mcp_main())
         return
 

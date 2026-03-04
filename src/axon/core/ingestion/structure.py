@@ -7,7 +7,6 @@ knowledge graph with File and Folder nodes connected by CONTAINS relationships.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
@@ -17,9 +16,7 @@ from axon.core.graph.model import (
     RelType,
     generate_id,
 )
-
-if TYPE_CHECKING:
-    from axon.core.ingestion.walker import FileEntry
+from axon.core.ingestion.walker import FileEntry
 
 def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
     """Build File/Folder nodes and CONTAINS relationships from a list of files.
@@ -50,7 +47,6 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
                 continue
             folder_paths.add(parent_str)
 
-    # Pass 2: create all nodes and edges.
     for dir_path in folder_paths:
         folder_id = generate_id(NodeLabel.FOLDER, dir_path)
         if graph.get_node(folder_id) is None:
@@ -62,7 +58,6 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
                     file_path=dir_path,
                 )
             )
-        # Folder → parent folder CONTAINS edge.
         dir_pure = PurePosixPath(dir_path)
         parent_str = str(dir_pure.parent)
         if parent_str != ".":
@@ -89,7 +84,6 @@ def process_structure(files: list[FileEntry], graph: KnowledgeGraph) -> None:
                 language=file_info.language,
             )
         )
-        # Folder → file CONTAINS edge.
         parent_str = str(PurePosixPath(file_info.path).parent)
         if parent_str != ".":
             parent_id = generate_id(NodeLabel.FOLDER, parent_str)

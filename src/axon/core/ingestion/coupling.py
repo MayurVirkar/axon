@@ -83,7 +83,6 @@ def parse_git_log(
             continue
 
         if stripped.startswith("COMMIT:"):
-            # Start of a new commit — flush the previous one.
             if current_files:
                 commits.append(current_files)
             current_files = []
@@ -91,7 +90,6 @@ def parse_git_log(
             if graph_files is None or stripped in graph_files:
                 current_files.append(stripped)
 
-    # Flush the last commit.
     if current_files:
         commits.append(current_files)
 
@@ -146,23 +144,6 @@ def calculate_coupling(
     co_changes: int,
     total_changes: dict[str, int],
 ) -> float:
-    """Compute the coupling strength between two files.
-
-    The formula is::
-
-        coupling = co_changes / max(total_changes[file_a], total_changes[file_b])
-
-    This yields a value in ``[0.0, 1.0]`` — higher means more tightly coupled.
-
-    Args:
-        file_a: First file path.
-        file_b: Second file path.
-        co_changes: Number of commits where both files changed together.
-        total_changes: Mapping of file path to its total commit count.
-
-    Returns:
-        A float between 0.0 and 1.0 representing coupling strength.
-    """
     max_changes = max(total_changes.get(file_a, 0), total_changes.get(file_b, 0))
     if max_changes == 0:
         return 0.0
@@ -176,11 +157,6 @@ def resolve_coupling(
     commits: list[list[str]] | None = None,
     min_cochanges: int = 3,
 ) -> list[ResolvedEdge]:
-    """Compute coupling edges without writing to the graph.
-
-    Does the git log parsing, co-change matrix, and strength calculation,
-    returning a list of :class:`ResolvedEdge` objects ready to be written.
-    """
     file_nodes = graph.get_nodes_by_label(NodeLabel.FILE)
     graph_files: set[str] = {n.file_path for n in file_nodes}
 

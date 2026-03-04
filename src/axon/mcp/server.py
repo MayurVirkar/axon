@@ -47,7 +47,6 @@ server = Server("axon")
 _storage: KuzuBackend | None = None
 _lock: asyncio.Lock | None = None
 
-# Resolved once at first use so we don't call Path.cwd() repeatedly.
 _db_path: Path | None = None
 
 
@@ -226,7 +225,6 @@ async def list_tools() -> list[Tool]:
     return TOOLS
 
 def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
-    """Synchronous tool dispatch — called directly or via ``asyncio.to_thread``."""
     if name == "axon_list_repos":
         return handle_list_repos()
     elif name == "axon_query":
@@ -281,7 +279,6 @@ async def list_resources() -> list[Resource]:
     ]
 
 def _dispatch_resource(uri_str: str, storage: KuzuBackend) -> str:
-    """Synchronous resource dispatch."""
     if uri_str == "axon://overview":
         return get_overview(storage)
     if uri_str == "axon://dead-code":

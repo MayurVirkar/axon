@@ -1,15 +1,10 @@
-"""Phase 6: Heritage extraction for Axon.
-
-Takes FileParseData from the parser phase and creates EXTENDS / IMPLEMENTS
-relationships between Class and Interface nodes in the knowledge graph.
-
-Heritage tuples have the shape ``(class_name, kind, parent_name)`` where
-*kind* is either ``"extends"`` or ``"implements"``.
-"""
+"""Phase 6: Heritage extraction — creates EXTENDS / IMPLEMENTS edges."""
 
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
@@ -38,15 +33,7 @@ def _resolve_node(
     symbol_index: dict[str, list[str]],
     graph: KnowledgeGraph,
 ) -> str | None:
-    """Resolve a symbol *name* to a node ID, preferring same-file matches.
-
-    1. Check whether the global index contains *name*.
-    2. Prefer any candidate defined in the same *file_path*.
-    3. Fall back to the first candidate (cross-file reference).
-
-    Returns:
-        The node ID if resolved, otherwise ``None``.
-    """
+    """Resolve a symbol name to a node ID, preferring same-file matches."""
     candidate_ids = symbol_index.get(name)
     if not candidate_ids:
         return None
@@ -63,12 +50,7 @@ def resolve_file_heritage(
     symbol_index: dict[str, list[str]],
     graph: KnowledgeGraph,
 ) -> tuple[list[ResolvedEdge], list[NodePropertyPatch]]:
-    """Resolve heritage relationships for a single file -- pure read, no graph mutation.
-
-    Returns a tuple of:
-    * A list of :class:`ResolvedEdge` instances (one per valid heritage relationship).
-    * A list of :class:`NodePropertyPatch` instances for protocol/ABC annotations.
-    """
+    """Resolve heritage relationships for a single file. Pure read, no graph mutation."""
     edges: list[ResolvedEdge] = []
     patches: list[NodePropertyPatch] = []
 
@@ -101,8 +83,6 @@ def resolve_file_heritage(
             continue
 
         if parent_id is None:
-            # Parent is external.  If it is a protocol/ABC marker,
-            # record a patch so the caller can annotate the child.
             if parent_name in _PROTOCOL_MARKERS:
                 patches.append(NodePropertyPatch(
                     node_id=child_id,
@@ -163,9 +143,6 @@ def process_heritage(
     symbol_index = name_index if name_index is not None else build_name_index(graph, _HERITAGE_LABELS)
 
     if parallel:
-        import os
-        from concurrent.futures import ThreadPoolExecutor
-
         workers = min(os.cpu_count() or 4, 8, len(parse_data))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             all_results = list(pool.map(
@@ -179,17 +156,13 @@ def process_heritage(
     flat_patches = [patch for _, patches in all_results for patch in patches]
 
     if collect:
-        # Defer all mutations — patches are applied by the caller after
-        # concurrent phases finish to avoid a read/write race on graph nodes.
         return flat_edges, flat_patches
 
-    # Apply property patches (protocol/ABC annotations).
     for patch in flat_patches:
         node = graph.get_node(patch.node_id)
         if node is not None:
             node.properties[patch.key] = patch.value
 
-    # Cross-file dedup by rel_id and write.
     written: set[str] = set()
     for edge in flat_edges:
         if edge.rel_id in written:

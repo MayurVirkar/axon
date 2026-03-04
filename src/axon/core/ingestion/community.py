@@ -1,9 +1,4 @@
-"""Phase 8: Community detection for Axon.
-
-Uses igraph + leidenalg to partition the call graph into functional clusters
-(communities). Each community groups tightly-connected symbols that likely
-belong to the same logical feature or module.
-"""
+"""Phase 8: Community detection for Axon."""
 
 from __future__ import annotations
 
@@ -129,7 +124,6 @@ def generate_label(graph: KnowledgeGraph, member_ids: list[str]) -> str:
     if len(most_common) == 1:
         return most_common[0][0].capitalize()
 
-    # Mixed directories: combine top two.
     label = f"{most_common[0][0]}+{most_common[1][0]}"
     return label.capitalize()
 

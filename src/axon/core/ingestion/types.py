@@ -9,6 +9,8 @@ type nodes.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 from axon.core.graph.graph import KnowledgeGraph
 from axon.core.graph.model import (
@@ -39,36 +41,15 @@ def _resolve_type(
     type_index: dict[str, list[str]],
     graph: KnowledgeGraph,
 ) -> str | None:
-    """Resolve a type name to a target node ID.
-
-    Resolution strategy (tried in order):
-
-    1. **Same-file match** -- the type is defined in the same file as the
-       reference.
-    2. **Global match** -- any type with this name anywhere in the codebase.
-       If multiple matches exist the first one is returned.
-
-    Args:
-        type_name: The referenced type name (e.g. ``"User"``).
-        file_path: Path to the file containing the type reference.
-        type_index: Mapping from type names to node IDs built by
-            :func:`build_type_index`.
-        graph: The knowledge graph.
-
-    Returns:
-        The node ID of the resolved type, or ``None`` if unresolved.
-    """
     candidate_ids = type_index.get(type_name, [])
     if not candidate_ids:
         return None
 
-    # 1. Same-file match.
     for nid in candidate_ids:
         node = graph.get_node(nid)
         if node is not None and node.file_path == file_path:
             return nid
 
-    # 2. Global match -- return the first candidate.
     return candidate_ids[0]
 
 def resolve_file_types(
@@ -134,9 +115,6 @@ def process_types(
     file_sym_index = build_file_symbol_index(graph, _CONTAINER_LABELS)
 
     if parallel:
-        import os
-        from concurrent.futures import ThreadPoolExecutor
-
         workers = min(os.cpu_count() or 4, 8, len(parse_data))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             all_edges = list(pool.map(
@@ -151,7 +129,6 @@ def process_types(
     if collect:
         return flat
 
-    # Cross-file dedup by rel_id and write.
     written: set[str] = set()
     for edge in flat:
         if edge.rel_id in written:
