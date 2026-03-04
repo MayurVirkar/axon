@@ -423,8 +423,29 @@ def serve(
     axon_dir.mkdir(parents=True, exist_ok=True)
     db_path = axon_dir / "kuzu"
 
+    # Try to acquire the write lock.  If another axon process already holds
+    # it, fall back to read-only mode (MCP server only, no file watcher).
     storage = KuzuBackend()
-    storage.initialize(db_path)
+    read_only_fallback = False
+    try:
+        storage.initialize(db_path)
+    except RuntimeError as e:
+        if "lock" in str(e).lower():
+            print(
+                "Another axon process holds the write lock. "
+                "Running in read-only mode (no file watching).",
+                file=sys.stderr,
+            )
+            storage.close()
+            read_only_fallback = True
+        else:
+            raise
+
+    if read_only_fallback:
+        # Read-only mode: just run the MCP server.
+        # _storage stays None in server.py → per-call short-lived connections.
+        asyncio.run(mcp_main())
+        return
 
     if not (axon_dir / "meta.json").exists():
         print("Running initial index...", file=sys.stderr)

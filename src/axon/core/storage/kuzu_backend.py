@@ -15,6 +15,7 @@ import logging
 import math
 import tempfile
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -131,7 +132,14 @@ class KuzuBackend:
             raise RuntimeError("KuzuBackend.initialize() must be called before use")
         return self._conn
 
-    def initialize(self, path: Path, *, read_only: bool = False) -> None:
+    def initialize(
+        self,
+        path: Path,
+        *,
+        read_only: bool = False,
+        max_retries: int = 0,
+        retry_delay: float = 0.3,
+    ) -> None:
         """Open or create the KuzuDB database at *path* and set up the schema.
 
         Args:
@@ -140,11 +148,26 @@ class KuzuBackend:
                 This allows multiple concurrent readers (e.g. MCP server
                 instances) without lock conflicts.  Schema creation is
                 skipped since the database must already exist.
+            max_retries: Number of retries on lock contention errors.
+            retry_delay: Base delay in seconds between retries (doubles each attempt).
         """
-        self._db = kuzu.Database(str(path), read_only=read_only)
-        self._conn = kuzu.Connection(self._db)
-        if not read_only:
-            self._create_schema()
+        for attempt in range(max_retries + 1):
+            try:
+                self._db = kuzu.Database(str(path), read_only=read_only)
+                self._conn = kuzu.Connection(self._db)
+                if not read_only:
+                    self._create_schema()
+                return
+            except RuntimeError as e:
+                if "lock" in str(e).lower() and attempt < max_retries:
+                    logger.debug(
+                        "Lock contention on attempt %d/%d, retrying in %.1fs",
+                        attempt + 1, max_retries, retry_delay * (2 ** attempt),
+                    )
+                    self.close()
+                    time.sleep(retry_delay * (2 ** attempt))
+                    continue
+                raise
 
     def close(self) -> None:
         """Release the connection and database handles.

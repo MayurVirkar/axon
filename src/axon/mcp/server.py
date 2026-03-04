@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -44,6 +46,16 @@ server = Server("axon")
 _storage: KuzuBackend | None = None
 _lock: asyncio.Lock | None = None
 
+# Resolved once at first use so we don't call Path.cwd() repeatedly.
+_db_path: Path | None = None
+
+
+def _resolve_db_path() -> Path:
+    global _db_path  # noqa: PLW0603
+    if _db_path is None:
+        _db_path = Path.cwd() / ".axon" / "kuzu"
+    return _db_path
+
 
 def set_storage(storage: KuzuBackend) -> None:
     """Inject a pre-initialised storage backend (e.g. from ``axon serve --watch``)."""
@@ -57,24 +69,23 @@ def set_lock(lock: asyncio.Lock) -> None:
     _lock = lock
 
 
-def _get_storage() -> KuzuBackend:
-    """Lazily initialise and return the KuzuDB storage backend.
+@contextmanager
+def _open_storage() -> Iterator[KuzuBackend]:
+    """Open a short-lived read-only connection for a single tool/resource call.
 
-    Looks for a ``.axon/kuzu`` directory in the current working directory.
-    If it exists, the backend is initialised from that path.  Otherwise a
-    bare (uninitialised) backend is returned so that tools can still be
-    called without crashing.
+    Used when no persistent storage was injected (read-only fallback mode).
+    Each call gets a fresh connection that sees the latest on-disk data and
+    releases the file lock immediately after the query completes.
     """
-    global _storage  # noqa: PLW0603
-    if _storage is None:
-        _storage = KuzuBackend()
-        db_path = Path.cwd() / ".axon" / "kuzu"
-        if db_path.exists():
-            _storage.initialize(db_path, read_only=True)
-            logger.info("Initialised storage (read-only) from %s", db_path)
-        else:
-            logger.warning("No .axon/kuzu directory found in %s", Path.cwd())
-    return _storage
+    db_path = _resolve_db_path()
+    if not db_path.exists():
+        raise FileNotFoundError(f"No .axon/kuzu directory in {db_path.parent.parent}")
+    storage = KuzuBackend()
+    storage.initialize(db_path, read_only=True, max_retries=3, retry_delay=0.3)
+    try:
+        yield storage
+    finally:
+        storage.close()
 
 TOOLS: list[Tool] = [
     Tool(
@@ -216,14 +227,21 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Dispatch a tool call to the appropriate handler."""
-    storage = _get_storage()
-
     try:
-        if _lock is not None:
-            async with _lock:
-                result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
+        if _storage is not None:
+            # Persistent mode (got write lock): use injected storage + async lock.
+            if _lock is not None:
+                async with _lock:
+                    result = await asyncio.to_thread(_dispatch_tool, name, arguments, _storage)
+            else:
+                result = await asyncio.to_thread(_dispatch_tool, name, arguments, _storage)
         else:
-            result = await asyncio.to_thread(_dispatch_tool, name, arguments, storage)
+            # Read-only fallback: short-lived connection per call.
+            def _run() -> str:
+                with _open_storage() as st:
+                    return _dispatch_tool(name, arguments, st)
+
+            result = await asyncio.to_thread(_run)
     except Exception as exc:
         logger.exception("Tool %s raised an unhandled exception", name)
         result = f"Internal error: {exc}"
@@ -268,13 +286,20 @@ def _dispatch_resource(uri_str: str, storage: KuzuBackend) -> str:
 @server.read_resource()
 async def read_resource(uri) -> str:
     """Read the contents of an Axon resource."""
-    storage = _get_storage()
     uri_str = str(uri)
 
-    if _lock is not None:
-        async with _lock:
-            return await asyncio.to_thread(_dispatch_resource, uri_str, storage)
-    return await asyncio.to_thread(_dispatch_resource, uri_str, storage)
+    if _storage is not None:
+        if _lock is not None:
+            async with _lock:
+                return await asyncio.to_thread(_dispatch_resource, uri_str, _storage)
+        return await asyncio.to_thread(_dispatch_resource, uri_str, _storage)
+
+    # Read-only fallback: short-lived connection per call.
+    def _run() -> str:
+        with _open_storage() as st:
+            return _dispatch_resource(uri_str, st)
+
+    return await asyncio.to_thread(_run)
 
 async def main() -> None:
     """Run the Axon MCP server over stdio transport."""
