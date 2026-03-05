@@ -1,6 +1,6 @@
 """MCP server for Axon — exposes code intelligence tools over stdio transport.
 
-Registers seven tools and three resources that give AI agents and MCP clients
+Registers eleven tools and three resources that give AI agents and MCP clients
 access to the Axon knowledge graph.  The server lazily initialises a
 :class:`KuzuBackend` from the ``.axon/kuzu`` directory in the current
 working directory.
@@ -31,13 +31,17 @@ from axon.core.storage.kuzu_backend import KuzuBackend
 from axon.mcp.resources import get_dead_code_list, get_overview, get_schema
 from axon.mcp.tools import (
     MAX_TRAVERSE_DEPTH,
+    handle_communities,
     handle_context,
+    handle_coupling,
     handle_cypher,
     handle_dead_code,
     handle_detect_changes,
+    handle_explain,
     handle_impact,
     handle_list_repos,
     handle_query,
+    handle_review_risk,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,6 +221,79 @@ TOOLS: list[Tool] = [
             "required": ["query"],
         },
     ),
+    Tool(
+        name="axon_coupling",
+        description=(
+            "Show files temporally coupled with a given file. "
+            "Reveals hidden dependencies from git co-change patterns."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to analyze coupling for.",
+                },
+                "min_strength": {
+                    "type": "number",
+                    "description": "Minimum coupling strength threshold (default 0.3).",
+                    "default": 0.3,
+                },
+            },
+            "required": ["file_path"],
+        },
+    ),
+    Tool(
+        name="axon_communities",
+        description=(
+            "List detected code communities (Leiden clusters) or drill into "
+            "a specific community to see its members."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "community": {
+                    "type": "string",
+                    "description": "Optional community name to drill into. Omit to list all.",
+                },
+            },
+        },
+    ),
+    Tool(
+        name="axon_explain",
+        description=(
+            "Get a narrative explanation of a symbol: its role, community, "
+            "process flows, and relationships summarized for onboarding."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Name of the symbol to explain.",
+                },
+            },
+            "required": ["symbol"],
+        },
+    ),
+    Tool(
+        name="axon_review_risk",
+        description=(
+            "PR risk assessment: analyzes a git diff to find affected symbols, "
+            "missing co-change files, community boundary crossings, and "
+            "downstream blast radius. Returns a risk score."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "diff": {
+                    "type": "string",
+                    "description": "Raw git diff output.",
+                },
+            },
+            "required": ["diff"],
+        },
+    ),
 ]
 
 @server.list_tools()
@@ -239,6 +316,17 @@ def _dispatch_tool(name: str, arguments: dict, storage: KuzuBackend) -> str:
         return handle_detect_changes(storage, arguments.get("diff", ""))
     elif name == "axon_cypher":
         return handle_cypher(storage, arguments.get("query", ""))
+    elif name == "axon_coupling":
+        return handle_coupling(
+            storage, arguments.get("file_path", ""),
+            min_strength=arguments.get("min_strength", 0.3),
+        )
+    elif name == "axon_communities":
+        return handle_communities(storage, community=arguments.get("community"))
+    elif name == "axon_explain":
+        return handle_explain(storage, arguments.get("symbol", ""))
+    elif name == "axon_review_risk":
+        return handle_review_risk(storage, arguments.get("diff", ""))
     else:
         return f"Unknown tool: {name}"
 

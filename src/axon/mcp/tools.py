@@ -354,6 +354,29 @@ def handle_dead_code(storage: StorageBackend) -> str:
 _DIFF_FILE_PATTERN = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
 _DIFF_HUNK_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 
+
+def _parse_diff_files(diff: str) -> dict[str, list[tuple[int, int]]]:
+    """Parse a git diff and return {file_path: [(start, end), ...]}."""
+    changed_files: dict[str, list[tuple[int, int]]] = {}
+    current_file: str | None = None
+
+    for line in diff.split("\n"):
+        file_match = _DIFF_FILE_PATTERN.match(line)
+        if file_match:
+            current_file = file_match.group(2)
+            if current_file not in changed_files:
+                changed_files[current_file] = []
+            continue
+
+        hunk_match = _DIFF_HUNK_PATTERN.match(line)
+        if hunk_match and current_file is not None:
+            start = int(hunk_match.group(1))
+            count = max(1, int(hunk_match.group(2) or "1"))
+            changed_files[current_file].append((start, start + count - 1))
+
+    return changed_files
+
+
 def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     """Map git diff output to affected symbols.
 
@@ -370,24 +393,7 @@ def handle_detect_changes(storage: StorageBackend, diff: str) -> str:
     if not diff.strip():
         return "Empty diff provided."
 
-    changed_files: dict[str, list[tuple[int, int]]] = {}
-    current_file: str | None = None
-
-    for line in diff.split("\n"):
-        file_match = _DIFF_FILE_PATTERN.match(line)
-        if file_match:
-            current_file = file_match.group(2)
-            if current_file not in changed_files:
-                changed_files[current_file] = []
-            continue
-
-        hunk_match = _DIFF_HUNK_PATTERN.match(line)
-        if hunk_match and current_file is not None:
-            start = int(hunk_match.group(1))
-            # Use max(1, ...) so pure-deletion hunks (count=0) don't produce
-            # an inverted range (start - 1 < start).
-            count = max(1, int(hunk_match.group(2) or "1"))
-            changed_files[current_file].append((start, start + count - 1))
+    changed_files = _parse_diff_files(diff)
 
     if not changed_files:
         return "Could not parse any changed files from the diff."
@@ -549,4 +555,292 @@ def handle_coupling(
         lines.append(
             f"\u26a0\ufe0f {len(hidden)} file(s) have hidden dependencies (no static import)."
         )
+    return "\n".join(lines)
+
+
+def handle_communities(
+    storage: StorageBackend, community: str | None = None
+) -> str:
+    """List communities or drill into a specific one."""
+    if community:
+        escaped = _escape_cypher(community)
+        rows = storage.execute_raw(
+            f"MATCH (n)-[:MEMBER_OF]->(c:Community) "
+            f"WHERE c.name = '{escaped}' "
+            f"RETURN n.name, label(n), n.file_path, n.start_line, "
+            f"n.is_entry_point, n.is_exported "
+            f"ORDER BY n.file_path, n.start_line"
+        ) or []
+
+        if not rows:
+            return f"Community '{community}' not found or has no members."
+
+        lines = [f"Community: {community}"]
+        lines.append(f"Members ({len(rows)}):")
+        lines.append("")
+        for row in rows:
+            name = row[0] or "?"
+            label = row[1] or "Unknown"
+            file_path = row[2] or "?"
+            start_line = row[3] or 0
+            is_entry = row[4] if len(row) > 4 else False
+            is_exported = row[5] if len(row) > 5 else False
+            tags = []
+            if is_entry:
+                tags.append("entry point")
+            if is_exported:
+                tags.append("exported")
+            tag_str = f"  [{', '.join(tags)}]" if tags else ""
+            lines.append(f"  - {name} ({label}) — {file_path}:{start_line}{tag_str}")
+
+        return "\n".join(lines)
+
+    # List mode
+    rows = storage.execute_raw(
+        "MATCH (c:Community) "
+        "RETURN c.name, c.cohesion, c.properties_json "
+        "ORDER BY c.cohesion DESC"
+    ) or []
+
+    if not rows:
+        return "No communities detected. Run indexing with community detection enabled."
+
+    lines = [f"Communities ({len(rows)} detected):"]
+    lines.append("")
+    for i, row in enumerate(rows, 1):
+        name = row[0] or "?"
+        cohesion = row[1] or 0.0
+        props_raw = row[2] or "{}"
+        try:
+            props = json.loads(props_raw) if isinstance(props_raw, str) else props_raw
+        except (json.JSONDecodeError, TypeError):
+            props = {}
+        symbol_count = props.get("symbol_count", "?")
+        lines.append(f"  {i}. {name}  (cohesion: {cohesion:.2f}, {symbol_count} symbols)")
+
+    # Cross-community processes
+    cross_procs = storage.execute_raw(
+        "MATCH (n)-[:STEP_IN_PROCESS]->(p:Process), (n)-[:MEMBER_OF]->(c:Community) "
+        "WITH p.name AS proc, collect(DISTINCT c.name) AS comms "
+        "WHERE size(comms) > 1 "
+        "RETURN proc, comms"
+    ) or []
+
+    if cross_procs:
+        lines.append("")
+        lines.append("Cross-community processes:")
+        for row in cross_procs:
+            proc_name = row[0] or "?"
+            comms = row[1] if len(row) > 1 else []
+            comm_str = " → ".join(comms) if isinstance(comms, list) else str(comms)
+            lines.append(f"  - {proc_name} ({comm_str})")
+
+    return "\n".join(lines)
+
+
+def handle_explain(storage: StorageBackend, symbol: str) -> str:
+    """Produce a narrative explanation of a symbol."""
+    if not symbol or not symbol.strip():
+        return "Error: 'symbol' parameter is required and cannot be empty."
+
+    results = _resolve_symbol(storage, symbol)
+    if not results:
+        return f"Symbol '{symbol}' not found."
+
+    node = storage.get_node(results[0].node_id)
+    if not node:
+        return f"Symbol '{symbol}' not found."
+
+    label_display = node.label.value.title() if node.label else "Unknown"
+    lines = [f"Explanation: {node.name} ({label_display})"]
+    lines.append("=" * 48)
+    lines.append("")
+
+    # Role
+    roles = []
+    if node.is_entry_point:
+        roles.append("Entry point")
+    if node.is_exported:
+        roles.append("Exported")
+    if node.is_dead:
+        roles.append("Dead code (unreachable)")
+    if roles:
+        lines.append(f"Role: {', '.join(roles)}")
+
+    lines.append(f"Location: {node.file_path}:{node.start_line}-{node.end_line}")
+
+    if node.signature:
+        lines.append(f"Signature: {node.signature}")
+
+    # Community
+    escaped_id = _escape_cypher(node.id)
+    comm_rows = storage.execute_raw(
+        f"MATCH (n)-[:MEMBER_OF]->(c:Community) "
+        f"WHERE n.id = '{escaped_id}' "
+        f"RETURN c.name"
+    ) or []
+    if comm_rows:
+        comm_name = comm_rows[0][0] or "?"
+        lines.append(f"Community: {comm_name}")
+
+    lines.append("")
+
+    # Callers and callees summary
+    try:
+        callers = storage.get_callers_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callers = [(c, 1.0) for c in storage.get_callers(node.id)]
+
+    try:
+        callees = storage.get_callees_with_confidence(node.id)
+    except (AttributeError, TypeError):
+        callees = [(c, 1.0) for c in storage.get_callees(node.id)]
+
+    if callers:
+        caller_names = ", ".join(c.name for c, _ in callers[:5])
+        suffix = f" (+{len(callers) - 5} more)" if len(callers) > 5 else ""
+        lines.append(f"Called by {len(callers)}: {caller_names}{suffix}")
+    else:
+        lines.append("Called by: nothing (root or dead)")
+
+    if callees:
+        callee_names = ", ".join(c.name for c, _ in callees[:5])
+        suffix = f" (+{len(callees) - 5} more)" if len(callees) > 5 else ""
+        lines.append(f"Calls {len(callees)}: {callee_names}{suffix}")
+    else:
+        lines.append("Calls: nothing (leaf)")
+
+    # Process flows
+    proc_rows = storage.execute_raw(
+        f"MATCH (n)-[:STEP_IN_PROCESS]->(p:Process) "
+        f"WHERE n.id = '{escaped_id}' "
+        f"RETURN p.name, count(*)"
+    ) or []
+    if proc_rows:
+        lines.append("")
+        lines.append("Process flows through this symbol:")
+        for row in proc_rows:
+            proc_name = row[0] or "?"
+            lines.append(f"  - {proc_name}")
+
+    return "\n".join(lines)
+
+
+def handle_review_risk(storage: StorageBackend, diff: str) -> str:
+    """Assess PR risk by synthesizing multiple graph signals."""
+    if not diff.strip():
+        return "Empty diff provided."
+
+    changed_files = _parse_diff_files(diff)
+    if not changed_files:
+        return "Could not parse any changed files from the diff."
+
+    changed_file_set = set(changed_files.keys())
+    all_affected_symbols: list[tuple[str, str, str, int]] = []
+    entry_points_hit = 0
+    total_dependents = 0
+
+    for file_path, ranges in changed_files.items():
+        if not _SAFE_PATH.match(file_path):
+            continue
+        escaped = _escape_cypher(file_path)
+        rows = storage.execute_raw(
+            f"MATCH (n) WHERE n.file_path = '{escaped}' "
+            f"AND n.start_line > 0 "
+            f"RETURN n.id, n.name, n.file_path, n.start_line, n.end_line"
+        ) or []
+
+        for row in rows:
+            node_id = row[0] or ""
+            name = row[1] or ""
+            start_line = row[3] or 0
+            end_line = row[4] or 0
+            label_prefix = node_id.split(":", 1)[0].title() if node_id else ""
+
+            hit = any(start_line <= end and end_line >= start for start, end in ranges)
+            if not hit:
+                continue
+
+            node = storage.get_node(node_id)
+            dep_count = 0
+            if node:
+                deps = storage.traverse_with_depth(node.id, 2, direction="callers")
+                dep_count = len(deps)
+                if node.is_entry_point:
+                    entry_points_hit += 1
+
+            total_dependents += dep_count
+            all_affected_symbols.append((name, label_prefix, file_path, dep_count))
+
+    # Missing co-change files
+    missing_cochange: list[tuple[str, str, float]] = []
+    for file_path in changed_files:
+        if not _SAFE_PATH.match(file_path):
+            continue
+        escaped = _escape_cypher(file_path)
+        coupling_rows = storage.execute_raw(
+            f"MATCH (a:File)-[r:COUPLED_WITH]-(b:File) "
+            f"WHERE a.file_path = '{escaped}' AND r.strength >= 0.5 "
+            f"RETURN b.file_path, r.strength"
+        ) or []
+        for row in coupling_rows:
+            coupled_file = row[0] or ""
+            strength = row[1] or 0.0
+            if coupled_file not in changed_file_set:
+                missing_cochange.append((coupled_file, file_path, strength))
+
+    # Community boundary crossings
+    communities_touched: set[str] = set()
+    for name, label, file_path, _ in all_affected_symbols:
+        escaped = _escape_cypher(f"{label.lower()}:{file_path}:{name}")
+        comm_rows = storage.execute_raw(
+            f"MATCH (n)-[:MEMBER_OF]->(c:Community) "
+            f"WHERE n.id = '{escaped}' RETURN c.name"
+        ) or []
+        for row in comm_rows:
+            if row[0]:
+                communities_touched.add(row[0])
+
+    # Risk score
+    score = 0
+    score += entry_points_hit
+    score += len(missing_cochange)
+    score += total_dependents // 10
+    if len(communities_touched) > 1:
+        score += 2
+    score = min(score, 10)
+
+    if score <= 3:
+        level = "LOW"
+    elif score <= 6:
+        level = "MEDIUM"
+    else:
+        level = "HIGH"
+
+    lines = ["PR Risk Assessment"]
+    lines.append("=" * 48)
+    lines.append(f"Risk: {level} (score: {score}/10)")
+    lines.append("")
+
+    if all_affected_symbols:
+        lines.append(f"Changed symbols ({len(all_affected_symbols)}):")
+        for name, label, fp, deps in all_affected_symbols:
+            tags = []
+            if deps > 0:
+                tags.append(f"{deps} downstream dependents")
+            lines.append(f"  - {name} ({label}) — {fp}" + (f"  [{', '.join(tags)}]" if tags else ""))
+    else:
+        lines.append("No indexed symbols in changed lines.")
+
+    if missing_cochange:
+        lines.append("")
+        lines.append("⚠️ Missing co-change files (usually change together):")
+        for missing, coupled_with, strength in missing_cochange:
+            lines.append(f"  - {missing} (strength: {strength:.2f} with {coupled_with})")
+
+    if len(communities_touched) > 1:
+        lines.append("")
+        lines.append(f"Community boundary crossings: {len(communities_touched)}")
+        lines.append(f"  Spans: {', '.join(sorted(communities_touched))}")
+
     return "\n".join(lines)
