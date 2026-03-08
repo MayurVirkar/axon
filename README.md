@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./axon-logo.png" alt="Axon logo" width="420" />
+</p>
+
 # Axon
 
 **Building the knowledge graph for AI code agents.**
