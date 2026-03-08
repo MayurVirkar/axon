@@ -13,6 +13,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Request
+from httpx import ReadError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -168,6 +169,8 @@ def create_ui_proxy_app(api_base_url: str, *, dev: bool = False) -> FastAPI:
                     try:
                         async for chunk in upstream_stream.aiter_bytes():
                             yield chunk
+                    except ReadError:
+                        logger.debug("Managed host SSE stream closed", exc_info=True)
                     finally:
                         await upstream_stream.aclose()
 

@@ -883,17 +883,19 @@ def ui(
                 console.print(
                     f"[bold green]Axon UI[/bold green] available at {live_host['host_url']}"
                 )
-            if not no_open:
-                webbrowser.open(live_host["host_url"])
+                if not no_open:
+                    webbrowser.open(live_host["host_url"])
                 return
 
             proxy_app = web_app_module.create_ui_proxy_app(live_host["host_url"], dev=dev)
-            console.print(f"[bold green]Axon UI[/bold green] running at http://{DEFAULT_HOST}:{port}")
+            console.print(
+                f"[bold green]Axon UI[/bold green] running at http://{DEFAULT_HOST}:{port}"
+            )
             if not no_open:
                 webbrowser.open(f"http://{DEFAULT_HOST}:{port}")
-
             uvicorn.run(proxy_app, host=DEFAULT_HOST, port=port, log_level="warning")
             return
+
         _run_shared_host(
             port=port,
             bind=DEFAULT_HOST,
